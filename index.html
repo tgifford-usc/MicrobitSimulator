@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MakeCode + Serial Bridge</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; }
+      .wrap { display: grid; grid-template-columns: 1fr 420px; height: 100vh; }
+      #frameHost iframe { width: 100%; height: 100%; border: 0; }
+      .side { border-left: 1px solid #ddd; padding: 12px; overflow: auto; }
+      .log { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+      input, button { padding: 8px; }
+      .row { display: flex; gap: 8px; margin: 8px 0; }
+      .row input { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div id="frameHost"></div>
+
+      <div class="side">
+        <h3>Serial Bridge</h3>
+        <p>
+          This listens for serial output from the MakeCode simulator and can send text back.
+          (We’ll “discover” the exact message shape the first time by logging everything.)
+        </p>
+
+        <div class="row">
+          <input id="outgoing" placeholder="Send to simulator…" />
+          <button id="sendBtn">Send</button>
+        </div>
+
+        <button id="clearBtn">Clear log</button>
+
+        <h4>Messages from MakeCode iframe</h4>
+        <div id="log" class="log"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
