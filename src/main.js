@@ -9,6 +9,7 @@ const outgoing = document.getElementById("outgoing");
 // 1) Create the iframe with a *known-good* MakeCode URL (avoids the “Windows icon” issue)
 const iframe = document.createElement("iframe");
 iframe.allow = "usb; autoplay; camera; microphone;";
+iframe.id = "makecode-iframe";
 iframe.src = createMakeCodeURL(
   "https://makecode.offig.com/editor/",
   undefined, // version
@@ -22,10 +23,11 @@ host.appendChild(iframe);
 // 2) Initialize the frame driver (handshake / controller wiring)
 const driver = new MakeCodeFrameDriver(
   {
-    controllerId: "microbit-souped-up",
-    onEditorContentLoaded: () => {
-      appendLog("✅ MakeCode editor loaded in iframe");
-    },
+    controllerId: "microbit-sim-with-serial",
+    // onEditorContentLoaded: () => {
+    //   waitForSimAndInstallTap._timer = setInterval(waitForSimAndInstallTap, 200);
+    //   appendLog("✅ MakeCode editor loaded in iframe");
+    // },
   },
   () => iframe
 );
@@ -34,74 +36,48 @@ driver.initialize();
 
 clearBtn.onclick = () => (logEl.textContent = "");
 
-// 3) Listen to postMessage traffic from the iframe.
-// For now, log EVERYTHING so we can see the exact schema MakeCode sends for serial.
 
+function findSimWindow(win) {
+  try {
+    if (win?.pxsim?.serial?.inject) return win;
+  } catch (e) {
+    // ignore cross-origin (shouldn't happen now)
+  }
 
-window.addEventListener("message", (ev) => {
-  // IMPORTANT: only accept messages from MakeCode
-  //if (ev.origin !== "https://makecode.microbit.org") return;
-
-  // Log raw messages so we can identify serial packets
-  appendLog("← " + safeJson(ev.data));
-
-  // TODO (after you run once):
-  // Find the message that corresponds to serial output (e.g. “hello” from serial.writeLine)
-  // then extract that text and call your existing handler.
-  //
-  // Example pattern (you’ll adjust once you see the real shape):
-  // if (ev.data?.type === "serial" && typeof ev.data?.data === "string") {
-  //   onSerialLine(ev.data.data);
-  // }
-});
-
-
-// Put this somewhere that runs early (before/around driverRef.initialize()).
-/*
-window.addEventListener("message", (ev) => {
-  // Helpful: see *everything* coming in
-  console.log("[postMessage]", {
-    origin: ev.origin,
-    fromIframe: ev.source === document.querySelector("iframe")?.contentWindow,
-    data: ev.data,
-  });
-});
-*/
-
-// 4) Sending data TO the simulator:
-// This depends on the exact command schema that MakeCode expects.
-// We’ll use the same “inspect first” approach: once you’ve seen inbound serial messages,
-// we can mirror the format for outbound messages.
-
-function sendToSimulator(text) {
-  if (!iframe?.contentWindow) return;
-
-  iframe.contentWindow.postMessage({
-    type: "serial",
-    data: text + "\n",   // add newline if your microbit code uses readLine/onDataReceived
-    id: "bridge",        // can be anything; sim ignores mostly
-    sim: false
-  }, "https://makecode.offig.com"); // or "*" while same-origin testing
+  for (let i = 0; i < (win?.frames?.length || 0); i++) {
+    const found = findSimWindow(win.frames[i]);
+    if (found) return found;
+  }
+  return null;
 }
 
 
+// 4) Sending data TO the simulator:
+export function sendToSimulatorSerial(text) {
+  const editorIframe = document.getElementById("makecode-iframe");
+  const editorWin = editorIframe?.contentWindow;
+  if (!editorWin) {
+    console.warn("Editor iframe not ready");
+    return false;
+  }
+
+  const simWin = findSimWindow(editorWin);
+  if (!simWin) {
+    console.warn("Simulator not ready (pxsim.serial.inject not found yet)");
+    return false;
+  }
+
+  // Important: newline triggers onDataReceived(NewLine) patterns
+  const payload = text.endsWith("\n") ? text : text + "\n";
+  simWin.pxsim.serial.inject(payload);
+
+  return true;
+}
+
 sendBtn.onclick = () => {
-  const text = outgoing.value;
-  if (!text) return;
-
-  // Placeholder: we will replace this with the correct message format once identified.
-  // For now, just show what you *intend* to send:
-  appendLog("→ (should be sending) " + text);
-
-  sendToSimulator(text);
-
-  // Likely form will be something like:
-  // iframe.contentWindow.postMessage({ type: "...", ... }, "https://makecode.microbit.org");
-
-  outgoing.value = "";
+  const ok = sendToSimulatorSerial(outgoing.value);
+  appendLog(`→ ${outgoing.value}${ok ? "" : " (sim not ready)"}`);
 };
-
-
 
 
 function appendLog(line) {
@@ -112,3 +88,78 @@ function safeJson(x) {
   try { return JSON.stringify(x); }
   catch { return String(x); }
 }
+
+
+function installSimSerialTap(simWin) {
+  if (simWin.__serialTapInstalled) return;
+  simWin.__serialTapInstalled = true;
+
+  const pxsim = simWin.pxsim;
+  if (!pxsim?.serial) {
+    appendLog("⚠️ No pxsim.serial on sim window");
+    return;
+  }
+
+  // Tap outgoing serial at the API boundary
+  const ser = pxsim.serial;
+  if (typeof ser.writeString !== "function") {
+    appendLog("⚠️ pxsim.serial.writeString not found");
+    return;
+  }
+
+  if (!ser.__writeStringTapped) {
+    ser.__writeStringTapped = true;
+
+    const origWriteString = ser.writeString.bind(ser);
+
+    // Buffer to emit nice "lines" instead of chunks
+    let buf = "";
+
+    ser.writeString = (s) => {
+      const str = String(s ?? "");
+      buf += str;
+
+      // Flush whenever newline appears (CRLF or LF)
+      if (/\n/.test(buf)) {
+        // Split but keep last partial
+        const parts = buf.split(/\r?\n/);
+        buf = parts.pop() ?? "";
+        for (const line of parts) {
+          if (line.length) appendLog(`← ${line}`);
+        }
+      }
+
+      return origWriteString(s);
+    };
+
+    //appendLog("🧷 Installed serial-out tap at pxsim.serial.writeString");
+  }
+}
+
+
+// install the simulator serial tap
+setInterval(() => {
+  const editorWin = iframe.contentWindow;
+  if (!editorWin) return;
+
+  const simWin = findSimWindow(editorWin);
+  if (!simWin) return;
+
+  installSimSerialTap(simWin);
+}, 500);
+
+
+// Disable send button until simulator is ready
+let simReady = false;
+
+setInterval(() => {
+  if (simReady) return;
+  const simWin = findSimWindow(iframe.contentWindow);
+  if (simWin) {
+    simReady = true;
+    sendBtn.disabled = false;
+    //appendLog("🟢 Simulator ready");
+  }
+}, 200);
+
+sendBtn.disabled = true;
